@@ -681,7 +681,7 @@
    Format: https://home-post-proxy.YOURNAME.workers.dev
    Your API key lives securely in the Worker — not here.
 ================================================================ */
-const PROXY_URL = 'https://home-post-proxy.rkumar-1a2.workers.dev';
+const PROXY_URL = 'YOUR_WORKER_URL_HERE';
 
 /* ================================================================
    PABBLY WEBHOOK — sends posts to SocialChamp via Pabbly Connect
@@ -761,6 +761,7 @@ let selectedDealer = DEALERS[0];
 let currentPlatform = 'both';
 let currentTone = 'friendly';
 let uploadedImageData = null;
+let fetchedImageUrl = null;
 
 
 /* ================================================================
@@ -812,6 +813,7 @@ function handleImageUpload(e) {
   const reader = new FileReader();
   reader.onload = function(ev) {
     uploadedImageData = ev.target.result;
+    fetchedImageUrl = null; // clear URL-based image when manually uploading
     const zone = document.getElementById('uploadZone');
     zone.classList.add('has-image');
     zone.innerHTML = `<img src="${ev.target.result}" alt="Home photo">`;
@@ -942,13 +944,21 @@ Format:
   ${platforms.map(p => `"${p}": "complete post text here"`).join(',\n  ')}
 }`;
 
-  // Build message content
-  const messageContent = uploadedImageData
-    ? [
-        { type: 'image', source: { type: 'base64', media_type: uploadedImageData.split(';')[0].split(':')[1], data: uploadedImageData.split(',')[1] } },
-        { type: 'text', text: prompt + '\n\nNote: A photo of the home has been provided above. Reference specific visible details (exterior style, roofline, color, landscaping, etc.) naturally in the post copy.' }
-      ]
-    : prompt;
+  // Build message content — prefer uploaded base64, fall back to URL, then text only
+  let messageContent;
+  if (uploadedImageData) {
+    messageContent = [
+      { type: 'image', source: { type: 'base64', media_type: uploadedImageData.split(';')[0].split(':')[1], data: uploadedImageData.split(',')[1] } },
+      { type: 'text', text: prompt + '\n\nNote: A photo of the home has been provided above. Reference specific visible details (exterior style, roofline, color, landscaping, etc.) naturally in the post copy.' }
+    ];
+  } else if (fetchedImageUrl) {
+    messageContent = [
+      { type: 'image', source: { type: 'url', url: fetchedImageUrl } },
+      { type: 'text', text: prompt + '\n\nNote: The feature image of this home has been provided above. Reference specific visible details (exterior style, roofline, color, landscaping, siding, windows, etc.) naturally in the post copy.' }
+    ];
+  } else {
+    messageContent = prompt;
+  }
 
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Writing your posts...';
@@ -1218,14 +1228,27 @@ Return ONLY valid JSON, no markdown:
     if (details.price)      document.getElementById('price').value = details.price;
     if (details.highlights) document.getElementById('extras').value = details.highlights + (details.type ? ', ' + details.type : '');
 
-    // Step 4: load the feature image
+    // Step 4: store the image URL and show preview
     if (details.feature_image_url) {
-      status.textContent = 'Loading image...';
-      loadImageFromUrl(details.feature_image_url, url);
+      let imgUrl = details.feature_image_url;
+      // Make absolute URL
+      if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
+      if (imgUrl.startsWith('/')) {
+        try { const base = new URL(url); imgUrl = base.origin + imgUrl; } catch(e) {}
+      }
+      fetchedImageUrl = imgUrl;
+      uploadedImageData = null; // clear any manual upload
+
+      // Show as preview in the upload zone
+      const zone = document.getElementById('uploadZone');
+      zone.classList.add('has-image');
+      zone.innerHTML = '<img src="' + imgUrl + '" alt="Home photo" style="width:100%;height:200px;object-fit:cover;border-radius:10px;">';
+      status.textContent = '\u2713 Details + image loaded from ' + (details.model_name || 'page') + '!';
+    } else {
+      status.style.color = '#1a5c2a';
+      status.textContent = '\u2713 Details loaded from ' + (details.model_name || 'page') + '!';
     }
 
-    status.style.color = '#1a5c2a';
-    status.textContent = '✓ Details loaded from ' + (details.model_name || 'page') + '!';
 
   } catch (err) {
     status.style.color = '#c0392b';
