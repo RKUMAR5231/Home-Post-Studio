@@ -1168,105 +1168,106 @@ async function fetchFromUrl() {
   status.textContent = 'Loading page...';
 
   try {
-    // Step 1: fetch the raw HTML via our Worker
-    const res = await fetch(PROXY_URL, {
+    // Step 1: fetch HTML via Worker
+    const res  = await fetch(PROXY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ _service: 'scrape', _url: url })
     });
-    const rawRes = await res.text();
-    let html = '';
-    try {
-      const data = JSON.parse(rawRes);
-      html = data.html || '';
-    } catch(e) {
-      // If JSON parse fails, the response might be raw HTML itself
-      html = rawRes;
-    }
-    if (!html) throw new Error('Could not load page — check the URL and try again.');
+    const json = await res.json();
+    const html = json.html || '';
 
-    // Step 2: strip HTML to plain text before sending to Claude
-    status.textContent = 'Extracting home details...';
+    // Step 2: parse HTML in browser to get clean text + image URLs
+    const parser  = new DOMParser();
+    const doc     = parser.parseFromString(html, 'text/html');
 
-    // Parse HTML and extract just the text + image srcs — avoids JSON encoding issues
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
+    // Extract image URLs
+    const imgs = Array.from(doc.querySelectorAll('img'))
+      .map(i => i.getAttribute('src') || '')
+      .filter(s => s && !s.includes('data:') && !s.includes('dummy') && !s.includes('facebook.com') && /\.(jpg|jpeg|png|webp)/i.test(s))
+      .map(s => {
+        if (s.startsWith('//')) return 'https:' + s;
+        if (s.startsWith('/')) { try { return new URL(url).origin + s; } catch(e) { return s; } }
+        return s;
+      })
+      .slice(0, 5);
 
-    // Get all image URLs from the page
-    const imgUrls = Array.from(doc.querySelectorAll('img[src]'))
-      .map(img => img.src || img.getAttribute('src'))
-      .filter(src => src && !src.includes('data:') && !src.includes('dummy') && !src.includes('facebook') && (src.includes('.jpg') || src.includes('.png') || src.includes('.webp')))
-      .slice(0, 5)
-      .join('\n');
+    // Also check anchor hrefs for image links
+    const aImgs = Array.from(doc.querySelectorAll('a[href]'))
+      .map(a => a.getAttribute('href') || '')
+      .filter(h => /\.(jpg|jpeg|png|webp)/i.test(h))
+      .map(s => {
+        if (s.startsWith('/')) { try { return new URL(url).origin + s; } catch(e) { return s; } }
+        return s;
+      })
+      .slice(0, 5);
 
-    // Get clean page text
-    const pageText = (doc.body ? doc.body.innerText : doc.documentElement.innerText || '')
-      .replace(/\s+/g, ' ')
-      .substring(0, 3000);
+    const allImgs = [...new Set([...imgs, ...aImgs])];
 
-    const prompt = 'From this manufactured/modular home listing page, extract details.\n\nPAGE TEXT:\n' + pageText + '\n\nIMAGE URLS FOUND:\n' + imgUrls + '\n\nReturn ONLY valid JSON (no markdown):\n{"model_name":"","beds":"","baths":"","sqft":"","type":"","feature_image_url":"","price":"","highlights":""}';
+    // Get clean plain text
+    const bodyText = (doc.body || doc.documentElement).innerText
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .substring(0, 2000);
 
-    const aiRes = await fetch(PROXY_URL, {
+    // Step 3: send clean text + image list to Claude — NO raw HTML in JSON
+    status.textContent = 'Extracting details...';
+
+    const aiBody = {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: 'Extract home listing details from this page text and image URL list. Return ONLY a JSON object with these keys: model_name, beds, baths, sqft, type, feature_image_url, price, highlights. Use empty string if not found.\n\nPAGE TEXT:\n' + bodyText + '\n\nIMAGE URLS:\n' + allImgs.join('\n')
+      }]
+    };
+
+    const aiRes  = await fetch(PROXY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 500,
-        messages: [{ role: 'user', content: prompt }]
-      })
+      body: JSON.stringify(aiBody)
     });
 
-    const aiData = await aiRes.json();
+    const aiData  = await aiRes.json();
+    if (aiData.error) throw new Error(aiData.error.message);
+
     const rawText = aiData.content.map(b => b.text || '').join('');
     const clean   = rawText.replace(/```json|```/g, '').trim();
     const details = JSON.parse(clean);
 
-    // Step 3: auto-fill the form fields
+    // Step 4: fill form fields
     if (details.model_name) document.getElementById('modelName').value = details.model_name;
-    if (details.beds)        document.getElementById('beds').value = details.beds + (details.beds.includes('BR') ? '' : ' BR');
-    if (details.baths)       document.getElementById('baths').value = details.baths + (details.baths.includes('BA') ? '' : ' BA');
+    if (details.beds)  document.getElementById('beds').value  = details.beds.toString().includes('BR') ? details.beds : details.beds + ' BR';
+    if (details.baths) document.getElementById('baths').value = details.baths.toString().includes('BA') ? details.baths : details.baths + ' BA';
 
     let sqftVal = details.sqft || '';
-    if (!sqftVal && details.width && details.length) {
-      const w = parseFloat(details.width);
-      const l = parseFloat(details.length);
-      if (w && l) sqftVal = Math.round(w * l) + ' sq ft (approx)';
-    }
     if (sqftVal) document.getElementById('sqft').value = sqftVal;
-    if (details.price)      document.getElementById('price').value = details.price;
+    if (details.price)      document.getElementById('price').value  = details.price;
     if (details.highlights) document.getElementById('extras').value = details.highlights + (details.type ? ', ' + details.type : '');
 
-    // Step 4: store the image URL and show preview
+    // Step 5: set feature image
     status.style.color = '#1a5c2a';
     if (details.feature_image_url) {
-      let imgUrl = details.feature_image_url;
-      // Make absolute URL if needed
-      if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
-      if (imgUrl.startsWith('/')) {
-        try { const base = new URL(url); imgUrl = base.origin + imgUrl; } catch(e) {}
-      }
-      fetchedImageUrl = imgUrl;
+      fetchedImageUrl  = details.feature_image_url;
       uploadedImageData = null;
-
-      // Show preview directly — no need to fetch through Worker
       const zone = document.getElementById('uploadZone');
       zone.classList.add('has-image');
-      zone.innerHTML = '<img src="' + imgUrl + '" alt="Home photo" style="width:100%;height:200px;object-fit:cover;border-radius:10px;">';
-      status.textContent = '\u2713 Details + image loaded — ' + (details.model_name || 'home') + ' is ready!';
+      zone.innerHTML = '<img src="' + fetchedImageUrl + '" alt="Home photo" style="width:100%;height:200px;object-fit:cover;border-radius:10px;">';
+      status.textContent = '\u2713 ' + (details.model_name || 'Home') + ' loaded — ready to generate!';
     } else {
-      status.textContent = '\u2713 Details loaded — no image found on page. Upload one manually.';
+      status.textContent = '\u2713 Details loaded — no image found, upload one manually.';
     }
 
-
-  } catch (err) {
+  } catch(err) {
     status.style.color = '#c0392b';
-    status.textContent = 'Error: ' + (err.message || 'Could not fetch page');
+    status.textContent = 'Error: ' + (err.message || 'Could not load page');
     console.error(err);
   }
 
   btn.disabled    = false;
   btn.textContent = 'Fetch';
 }
+
 
 // loadImageFromUrl removed — images now passed directly via URL to Claude
 
