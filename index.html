@@ -772,25 +772,57 @@ function fillGraphic() {
   const sqft=document.getElementById('sqft').value.trim();
   const price=document.getElementById('price').value.trim();
   if (!model&&!beds){alert('Generate a post first so home details are filled in.');return;}
-  // Update layers with home data
-  updateLayerText('model', model.toUpperCase());
-  updateLayerText('specs', [beds,baths,sqft].filter(Boolean).join(' | '));
-  updateLayerText('price', price);
-  const bk=getActiveBK();
-  updateLayerText('phone', bk.phone||gDealer.phone||'');
-  updateLayerText('website', bk.website||gDealer.website||'');
-  updateLayerText('address', bk.address||gDealer.address||'');
-  // Load photo into graphic canvas
-  if (fetchedUrl&&!gImg1) {
-    const img=new Image(); img.crossOrigin='anonymous';
-    img.onload=()=>{ gImg1=img; renderCanvas(); };
-    img.onerror=()=>renderCanvas();
-    img.src=fetchedUrl;
-  } else renderCanvas();
-  // Switch to graphic tab
+
+  // Switch tab first WITHOUT resetting layers
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   const gtab=document.querySelectorAll('.tab')[1]; gtab.classList.add('active');
-  switchTab('graphics',gtab);
+  ['posts','graphics','brands'].forEach(t=>document.getElementById('tab-'+t).style.display=t==='graphics'?'':'none');
+
+  // Now update layer text (after tab switch, layers are already initialized)
+  const bk=getActiveBK();
+  updateLayerText('model',  model.toUpperCase());
+  updateLayerText('headline', model.toUpperCase());
+  updateLayerText('specs',  [beds,baths,sqft].filter(Boolean).join(' | '));
+  updateLayerText('sqft',   sqft);
+  updateLayerText('price',  price?'FROM '+price:price);
+  updateLayerText('phone',  bk.phone||gDealer.phone||'');
+  updateLayerText('website',bk.website||gDealer.website||'');
+  updateLayerText('address',bk.address||gDealer.address||'');
+  updateLayerText('dealer', gDealer.name.toUpperCase());
+  updateLayerText('calltext','CALL OR TEXT');
+  renderLayerList();
+
+  // Load image — try direct first, fall back to proxy if CORS blocks it
+  if (fetchedUrl) {
+    // Always use proxy to avoid CORS issues with dealer sites
+    fetch(PROXY_URL, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({_service:'extract_img', _url:fetchedUrl})
+    }).then(r=>r.json()).then(data=>{
+      if (data.base64) {
+        const img=new Image();
+        img.onload=()=>{ gImg1=img; gImg2=img;
+          const z=document.getElementById('gZone1');
+          z.classList.add('has'); z.innerHTML='<img src="'+img.src+'" style="width:100%;height:120px;object-fit:cover;border-radius:9px">';
+          renderCanvas();
+        };
+        img.src='data:image/jpeg;base64,'+data.base64;
+      } else {
+        // Try loading directly as fallback
+        const img=new Image();
+        img.onload=()=>{ gImg1=img; gImg2=img; renderCanvas(); };
+        img.onerror=()=>renderCanvas();
+        img.src=fetchedUrl;
+      }
+    }).catch(()=>{
+      const img=new Image();
+      img.onload=()=>{ gImg1=img; gImg2=img; renderCanvas(); };
+      img.onerror=()=>renderCanvas();
+      img.src=fetchedUrl;
+    });
+  } else {
+    renderCanvas();
+  }
 }
 
 function updateLayerText(id, val) {
